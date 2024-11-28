@@ -1,9 +1,5 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-#include <SoftwareSerial.h>
-
-// Configuración para SoftwareSerial
-SoftwareSerial Bluetooth(10, 11); // RX en 10, TX en 11
 
 // Configuración de pines
 const int trigPin = 8;  // TRIG del primer sensor
@@ -48,11 +44,17 @@ void sonarBuzzerEntrada();
 void sonarBuzzerSalida();
 void actualizarPantalla();
 void enviarPersonas();
+void mostrarAforoLleno();
+void enviarTotalEntradas();
+void procesarComando(String comando);
+
+// Variables globales adicionales
+int limiteAforo = 100;       // Límite de aforo predeterminado
+bool aforoLleno = false;     // Estado de aforo lleno
 
 void setup() {
   // Inicializar monitor serie
   Serial.begin(9600);
-  Bluetooth.begin(9600); // Comunicación con el módulo Bluetooth
   Serial.println("Sistema iniciado...");
   apagarLed();
 
@@ -89,117 +91,155 @@ void setup() {
 }
 
 void loop() {
+
   // Medir distancias actuales
   distance1 = medirDistancia(trigPin, echoPin);
   distance2 = medirDistancia(trigPin2, echoPin2);
 
+  // Leer comandos desde Serial
+  if (Serial.available() > 0) {
+    String comando = Serial.readStringUntil('\n');
+    comando.trim();
+    procesarComando(comando);
+  }
+
   // Máquina de estados
   switch (estadoActual) {
     case IDLE:
-      // Si el sensor 1 detecta algo, activar estado de entrada
       if (distance1 < 50 && distance1 < initialDistance1 - 30) {
         estadoActual = SENSOR1_ACTIVATED;
         tiempoEstado = millis(); // Guardar tiempo de activación
-        Serial.print(distance1);
-        Serial.println("Sensor 1 activado, esperando sensor 2...");
       } else if (distance2 < 50 && distance2 < initialDistance2 - 30) {
         estadoActual = SENSOR2_ACTIVATED;
         tiempoEstado = millis(); // Guardar tiempo de activación
-        Serial.print(distance2);
-        Serial.println("Sensor 2 activado, esperando sensor 1...");
       }
       break;
 
     case SENSOR2_ACTIVATED:
-      // Confirmar entrada si el sensor 2 detecta algo
       if (distance1 < 50 && distance1 < initialDistance1 - 30) {
-        personas++;
-        Serial.print("Entrada detectada. Total personas: ");
-        Serial.println(personas);
-        enviarPersonas();
-        encenderLedPorTiempo(pinGreen); // Encender LED verde por 2 segundos
-        sonarBuzzerEntrada();
-        actualizarPantalla();
-        estadoActual = IDLE; // Reiniciar a IDLE
+        if (!aforoLleno) {
+          personas++;
+          Serial.print("Entrada. Personas: ");
+          Serial.print(personas);
+          Serial.println(";");
+          encenderLedPorTiempo(pinGreen);
+          sonarBuzzerEntrada();
+          if (personas >= limiteAforo) {
+            aforoLleno = true;
+            mostrarAforoLleno();
+          } else {
+            actualizarPantalla();
+          }
+        } else {
+          mostrarAforoLleno();
+          Serial.println("Intento de entrada con aforo lleno.");
+        }
+        estadoActual = IDLE;
         delay(200);
       } else if (millis() - tiempoEstado > TIEMPO_LIMITE) {
-      Serial.println("Tiempo agotado para entrada, regresando a IDLE...");
-      estadoActual = IDLE;
-    }
+        estadoActual = IDLE;
+      }
       break;
 
     case SENSOR1_ACTIVATED:
-      // Confirmar salida si el sensor 1 detecta algo
       if (distance2 < 50 && distance2 < initialDistance2 - 30) {
         if (personas > 0) {
           personas--;
-          Serial.print("Salida detectada. Total personas: ");
-          Serial.println(personas);
-          enviarPersonas();
-          encenderLedPorTiempo(pinRed); // Encender LED rojo por 2 segundos
+          Serial.print("Salida. Personas: ");
+          Serial.print(personas);
+          Serial.println(";");
+          encenderLedPorTiempo(pinRed);
           sonarBuzzerSalida();
-          actualizarPantalla();
+          if (personas < limiteAforo) {
+            aforoLleno = false;
+            actualizarPantalla();
+          }
         } else {
           Serial.println("No hay personas para registrar salida.");
         }
-        estadoActual = IDLE; // Reiniciar a IDLE
+        estadoActual = IDLE;
         delay(200);
       } else if (millis() - tiempoEstado > TIEMPO_LIMITE) {
-      Serial.println("Tiempo agotado para entrada, regresando a IDLE...");
-      estadoActual = IDLE;
-    }
+        estadoActual = IDLE;
+      }
       break;
   }
 }
 
-// Función para medir distancia con un sensor ultrasónico
+void procesarComando(String comando) {
+  if (comando.startsWith("SET_AFORO")) {
+    int nuevoLimite = comando.substring(9).toInt();
+    if (nuevoLimite > 0 && nuevoLimite > personas) {
+      limiteAforo = nuevoLimite;
+      Serial.print("Nuevo límite de aforo establecido: ");
+      Serial.println(limiteAforo);
+    } else if (nuevoLimite <= personas) {
+      Serial.println("Error: El límite de aforo debe ser mayor al número actual de personas.");
+    } else {
+      Serial.println("Error: Límite de aforo no válido.");
+    }
+  } else if (comando == "RESET") {
+    enviarTotalEntradas();
+  }
+}
+
+void mostrarAforoLleno() {
+  lcd.clear();
+  lcd.setCursor(3, 0);
+  lcd.print("Aforo lleno");
+  lcd.setCursor(0, 1);
+  lcd.print("Personas: ");
+  lcd.print(personas);
+}
+
+void enviarTotalEntradas() {
+    personas = 0;
+    aforoLleno = false;
+    actualizarPantalla();
+    Serial.print("Entrada. Personas: ");
+    Serial.print(personas);
+    Serial.println(";");
+}
+
+
 int medirDistancia(int trigPin, int echoPin) {
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
   long duracion = pulseIn(echoPin, HIGH);
-  return duracion * 0.034 / 2; // Calcular la distancia en cm
+  return duracion * 0.034 / 2;
 }
 
-// Función para apagar los LEDs
 void apagarLed() {
   digitalWrite(pinRed, LOW);
   digitalWrite(pinGreen, LOW);
   digitalWrite(pinBlue, LOW);
 }
 
-// Función para encender un LED por un tiempo específico
 void encenderLedPorTiempo(int pinLed) {
-  digitalWrite(pinLed, LOW); // Encender LED
-  delay(200);                // Mantener encendido por 2 segundos
-  digitalWrite(pinLed, HIGH);  // Apagar LED
+  digitalWrite(pinLed, HIGH);
+  delay(300);
+  digitalWrite(pinLed, LOW);
 }
 
-// Función para sonar el buzzer en una entrada
 void sonarBuzzerEntrada() {
-  digitalWrite(buzzerPin, HIGH); // Encender el buzzer
-  delay(200);                // Mantener encendido por 2 segundos
-  digitalWrite(buzzerPin, LOW);  // Apagar el buzzer
+  digitalWrite(buzzerPin, HIGH);
+  delay(200);
+  digitalWrite(buzzerPin, LOW);
 }
 
-// Función para sonar el buzzer en una salida
 void sonarBuzzerSalida() {
-  digitalWrite(buzzerPin, HIGH); // Encender el buzzer
-  delay(200);                // Mantener encendido por 2 segundos
-  digitalWrite(buzzerPin, LOW);  // Apagar el buzzer
+  digitalWrite(buzzerPin, HIGH);
+  delay(200);
+  digitalWrite(buzzerPin, LOW);
 }
 
-// Función para actualizar la pantalla LCD
 void actualizarPantalla() {
-  lcd.clear();
-  lcd.setCursor(6, 0);
-  lcd.print("Aforo");
-  lcd.setCursor(8, 1);
-  lcd.print(personas);
-}
-
-// Función para enviar datos al módulo Bluetooth
-void enviarPersonas() {
-  Bluetooth.print("Personas actuales: ");
-  Bluetooth.println(personas);
+  if (!aforoLleno) {
+    lcd.clear();
+    lcd.setCursor(6, 0);
+    lcd.print("Aforo");
+    lcd.setCursor(8, 1);
+    lcd.print(personas);
+  }
 }
